@@ -1,4 +1,5 @@
 import dlt
+import sys
 from dlt.sources.helpers import requests
 
 # Updated with correct repository paths to avoid 404 errors
@@ -44,3 +45,4 @@ if __name__ == "__main__":
     # Running both resources
     load_info = pipeline.run([fetch_repo_stats, fetch_repo_events])
     print(load_info)
+    sys.exit(0)
