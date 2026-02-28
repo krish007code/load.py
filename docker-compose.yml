@@ -3,7 +3,6 @@ volumes:
   postgres_data:
   minio_data:
 
-# 1. Define the dedicated network
 networks:
   data_pipeline_net:
     driver: bridge
@@ -35,8 +34,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000" # API
-      - "9001:9001" # Console
+      - "9000:9000"
+      - "9001:9001" 
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
@@ -57,7 +56,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      # We use one YAML block to avoid mapping errors
+      # Updated configuration for KV and Gemini
       KESTRA_CONFIGURATION: |
         kestra:
           repository:
@@ -68,12 +67,16 @@ services:
             type: local
             local:
               basePath: /app/storage
+          
+          # Enable KV store features
+          variables:
+            enabled: true
 
           ai:
             type: gemini
             gemini:
               model-name: gemini-2.5-flash
-              api-key: ${GEMINI_API_KEY}
+              api-key: "${GEMINI_API_KEY}"
         
         datasources:
           postgres:

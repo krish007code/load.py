@@ -40,10 +40,11 @@ def fetch_repo_events():
                 yield event
 
 if __name__ == "__main__":
+    # Find this line in your load.py:
     pipeline = dlt.pipeline(
-        pipeline_name="github_mds_tracker",
-        destination="minio", 
-        dataset_name="bronze_github"
+        pipeline_name='github_data',
+        destination='filesystem',  # <--- MUST BE 'filesystem', NOT 'minio'
+        dataset_name='github_raw'
     )
 
     load_info = pipeline.run([fetch_repo_stats, fetch_repo_events])
