@@ -1,0 +1,67 @@
+id: mds_tracker_gold
+namespace: dev.krish
+tasks:
+  - id: aggregate_github_events
+    type: io.kestra.plugin.scripts.python.Script
+    containerImage: python:3.11-slim
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      networkMode: tracker-pipeline_data_pipeline_net
+    env:
+      MINIO_ACCESS_KEY: "{{ kv('MINIO_ACCESS_KEY') }}"
+      MINIO_SECRET_KEY: "{{ kv('MINIO_SECRET_KEY') }}"
+    script: |
+      import subprocess, os, time, sys
+
+      def main():
+          # 1. Install DuckDB first
+          subprocess.run(["pip", "install", "duckdb", "-q"], check=True)
+          
+          # 2. NOW you can import it
+          import duckdb
+
+          # 3. Connect and configure
+          con = duckdb.connect(database=':memory:')
+          con.execute("INSTALL httpfs; LOAD httpfs;")
+          
+          # Set S3 Credentials from Env
+          con.execute(f"SET s3_endpoint='minio:9000';")
+          con.execute(f"SET s3_access_key_id='{os.environ['MINIO_ACCESS_KEY']}';")
+          con.execute(f"SET s3_secret_access_key='{os.environ['MINIO_SECRET_KEY']}';")
+          con.execute("SET s3_use_ssl='false';")
+          con.execute("SET s3_url_style='path';")
+
+          sql_query = """
+          COPY (
+              SELECT
+                  repo_name,
+                  COUNT(*) AS total_activity,
+                  COUNT(DISTINCT user_handle) AS unique_contributors,
+                  MAX(created_at) AS last_updated_at,
+                  SUM(CASE WHEN event_type = 'PushEvent' THEN 1 ELSE 0 END) AS total_pushes,
+                  SUM(CASE WHEN event_type = 'WatchEvent' THEN 1 ELSE 0 END) AS total_stars
+              FROM read_parquet('s3://silver/github_events_cleaned.parquet')
+              GROUP BY repo_name
+          ) TO 's3://gold/repo_leaderboard.parquet' (FORMAT PARQUET, OVERWRITE_OR_IGNORE true);
+          """
+
+          print("Executing DuckDB aggregation...")
+          con.execute(sql_query)
+          print("Aggregation complete and results saved to S3.")
+
+          con.close()
+          time.sleep(2)
+          os._exit(0)
+
+      if __name__ == "__main__":
+          main()
+triggers:
+  - id: on_silver_success
+    type: io.kestra.plugin.core.trigger.Flow
+    preconditions:
+      id: silver_flow_completion
+      flows:
+        - namespace: dev.krish
+          flowId: mds_tracker_silver
+          states:
+            - SUCCESS

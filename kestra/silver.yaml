@@ -1,0 +1,107 @@
+id: mds_tracker_silver
+namespace: dev.krish
+description: "Silver Layer: Deduplicates and cleans compressed JSONL GitHub events"
+
+tasks:
+  - id: silver_transformation
+    type: io.kestra.plugin.scripts.python.Script
+    containerImage: python:3.11-slim
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      networkMode: tracker-pipeline_data_pipeline_net
+    env:
+      MINIO_ACCESS_KEY: "{{ kv('MINIO_ACCESS_KEY') }}"
+      MINIO_SECRET_KEY: "{{ kv('MINIO_SECRET_KEY') }}"
+    script: |
+      import sys
+      import subprocess, json, os, time
+
+      def main():
+          # Install dependencies quietly
+          subprocess.run(["pip", "install", "minio", "duckdb", "-q"], check=True)
+
+          from minio import Minio
+          import duckdb
+
+          access_key = os.environ["MINIO_ACCESS_KEY"]
+          secret_key = os.environ["MINIO_SECRET_KEY"]
+
+          client = Minio(
+              "minio:9000",
+              access_key=access_key,
+              secret_key=secret_key,
+              secure=False
+          )
+
+          # 1. Discover files in Bronze
+          all_objects = list(client.list_objects("bronze", recursive=True))
+          jsonl_paths = [
+              f"s3://bronze/{obj.object_name}"
+              for obj in all_objects
+              if obj.object_name.startswith("github_raw/repo_events/")
+              and obj.object_name.endswith(".jsonl.gz")
+          ]
+
+          if not jsonl_paths:
+              print("No new files to process. Skipping.")
+              time.sleep(2)
+              os._exit(0)
+
+          # 2. Setup DuckDB Connection
+          con = duckdb.connect()
+          con.execute("INSTALL httpfs; LOAD httpfs;")
+          con.execute("SET s3_endpoint='minio:9000';")
+          con.execute(f"SET s3_access_key_id='{access_key}';")
+          con.execute(f"SET s3_secret_access_key='{secret_key}';")
+          con.execute("SET s3_use_ssl='false';")
+          con.execute("SET s3_url_style='path';")
+
+          # 3. Define and run Transformation
+          sql = f"""
+            COPY (
+              SELECT
+                id,
+                COALESCE(actor__login, CAST(actor__id AS VARCHAR)) AS user_handle,
+                repo__name                                          AS repo_name,
+                CAST(created_at AS TIMESTAMP)                       AS created_at,
+                type                                                AS event_type,
+                json_object(
+                    'action', payload__action,
+                    'ref',    payload__ref,
+                    'number', payload__number,
+                    'before', payload__before,
+                    'head',   payload__head
+                ) AS payload
+              FROM read_json(
+                {json.dumps(jsonl_paths)},
+                format        = 'newline_delimited',
+                compression   = 'gzip',
+                union_by_name = true,
+                ignore_errors = true
+              )
+              QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY created_at DESC) = 1
+            ) TO 's3://silver/github_events_cleaned.parquet'
+              (FORMAT PARQUET, OVERWRITE_OR_IGNORE true);
+          """
+
+          print(f"Starting transformation for {len(jsonl_paths)} files...")
+          con.execute(sql)
+          con.close()
+          print("Silver layer written successfully.")
+          
+          # Cooldown to ensure Kestra flushes logs and registers success
+          time.sleep(2)
+          os._exit(0)
+
+      if __name__ == "__main__":
+          main()
+
+triggers:
+  - id: on_bronze_success
+    type: io.kestra.plugin.core.trigger.Flow
+    conditions:
+      - type: io.kestra.plugin.core.condition.ExecutionFlowCondition
+        flowId: mds_tracker_bronze
+        namespace: dev.krish
+      - type: io.kestra.plugin.core.condition.ExecutionStatusCondition
+        in: [SUCCESS]

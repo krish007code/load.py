@@ -1,0 +1,75 @@
+id: mds_tracker_viz
+namespace: dev.krish
+description: "Visualization Layer: Displays the Repository Leaderboard from Gold"
+tasks:
+  - id: display_leaderboard
+    type: io.kestra.plugin.scripts.python.Script
+    containerImage: python:3.11-slim
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      networkMode: tracker-pipeline_data_pipeline_net
+    env:
+      MINIO_ACCESS_KEY: "{{ kv('MINIO_ACCESS_KEY') }}"
+      MINIO_SECRET_KEY: "{{ kv('MINIO_SECRET_KEY') }}"
+    outputFiles:
+      - "leaderboard.md"
+    script: |
+      import subprocess, os, time, sys
+      
+      def main():
+          # 1. Install visualization dependencies
+          subprocess.run(["pip", "install", "duckdb", "tabulate", "pandas", "-q"], check=True)
+          import duckdb
+          from tabulate import tabulate
+
+          # 2. Setup DuckDB & S3
+          con = duckdb.connect()
+          con.execute("INSTALL httpfs; LOAD httpfs;")
+          con.execute(f"SET s3_endpoint='minio:9000';")
+          con.execute(f"SET s3_access_key_id='{os.environ['MINIO_ACCESS_KEY']}';")
+          con.execute(f"SET s3_secret_access_key='{os.environ['MINIO_SECRET_KEY']}';")
+          con.execute("SET s3_use_ssl='false'; SET s3_url_style='path';")
+
+          # 3. Fetch Top 10 Repositories
+          query = """
+              SELECT 
+                  repo_name AS "Repository", 
+                  total_stars AS "⭐ Stars", 
+                  total_pushes AS "🚀 Pushes", 
+                  total_activity AS "🔥 Total Activity"
+              FROM read_parquet('s3://gold/repo_leaderboard.parquet') 
+              ORDER BY total_activity DESC 
+              LIMIT 10
+          """
+          df = con.execute(query).df()
+
+          # 4. Print the "Dashboard" to Logs
+          print("\n" + "═"*60)
+          print("      🏆  GITHUB ANALYTICS: TOP 10 REPO LEADERBOARD  🏆")
+          print("═"*60)
+          print(tabulate(df, headers='keys', tablefmt='fancy_grid', showindex=False))
+          print("═"*60)
+          print(f"Report Generated At: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+          print("═"*60 + "\n")
+          
+          # 5. Save the "Dashboard" as a GitHub-flavored Markdown file
+          with open("leaderboard.md", "w") as f:
+              f.write("## GitHub Analytics: Top 10 Repository Leaderboard\n\n")
+              f.write(tabulate(df, headers='keys', tablefmt='github', showindex=False))
+              f.write(f"\n\nReport Generated At: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+          
+          con.close()
+          time.sleep(2)
+          os._exit(0)
+
+      if __name__ == "__main__":
+          main()
+triggers:
+  - id: on_gold_success
+    type: io.kestra.plugin.core.trigger.Flow
+    conditions:
+      - type: io.kestra.plugin.core.condition.ExecutionFlowCondition
+        flowId: mds_tracker_gold
+        namespace: dev.krish
+      - type: io.kestra.plugin.core.condition.ExecutionStatusCondition
+        in: [SUCCESS]
